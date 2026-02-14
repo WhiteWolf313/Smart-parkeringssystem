@@ -1,61 +1,80 @@
-# 🚗 Smart Parkeringssystem (Arduino & RFID)
+# Automatiserat IoT-Parkeringssystem med Edge Computing
 
-Detta projekt är ett automatiserat parkeringssystem byggt med Arduino. Systemet använder RFID-teknik för att hantera in- och utpassage, en RTC-modul för exakt tidsberäkning och servomotorer för att styra bommarna.
+> Ett driftsäkert parkeringssystem baserat på ESP32, RFID och Redis med offline-stöd.
 
-## 📋 Översikt
+![System Overview](Ska%CC%88rmavbild%202026-02-14%20kl.%2020.13.53.jpg)
 
-Systemet simulerar en verklig parkering där användaren "checkar in" med ett RFID-kort (biljett). Systemet loggar starttiden och öppnar bommen. Vid utgången scannar användaren kortet igen, varpå systemet räknar ut parkeringstiden och kostnaden. Efter simulerad betalning öppnas bommen.
+## 📖 Projektöversikt
+
+Målet med detta projekt är att utveckla ett automatiserat och driftsäkert parkeringssystem baserat på IoT-teknik. Systemet hanterar in- och utfart av fordon via RFID-identifiering och använder en lokal Redis-databas för snabb datahantering.
+
+Fokus ligger på att skapa en robust **"Edge Computing"**-lösning där systemet fungerar sömlöst både online och offline genom smart datasynkronisering ("Store and Forward").
 
 ### Nyckelfunktioner
 
-* **RFID-incheckning:** Ingen pappersbiljett behövs; kortets unika ID (UID) fungerar som biljett.
-* **Tidsberäkning:** Realtidsklocka (RTC) används för att beräkna exakt parkeringstid.
-* **Priskalkyl:** Automatisk uträkning av kostnad (t.ex. 10 kr/h).
-* **Kapacitetskontroll:** Håller koll på antalet lediga platser (Max 50 bilar).
-* **Visuell feedback:** LCD-skärm visar status, tid och pris.
+* **RFID-Autentisering:** Säker in- och utfart med RC522-läsare.
+* **Fordonsdetektering:** Ultraljudssensorer säkerställer att bommar inte stängs på fordon.
+* **Edge Database:** Lokal Redis-databas körs i Docker på en Raspberry Pi Zero 2 W.
+* **Offline-stöd:** Data buffras lokalt på ESP32 (LittleFS) vid nätverksbortfall och synkroniseras automatiskt när anslutningen återupptas.
+* **Visuell Feedback:** LCD-skärmar och servostyrda bommar.
 
 ---
 
-## 🛠 Hårdvara
+## 🏗 Systemarkitektur
 
-För att bygga detta system krävs följande komponenter:
+Systemet bygger på en klient-server-arkitektur där mikrokontrollern styr hårdvaran och servern hanterar datan.
 
-### Huvudkomponenter
+![System Architecture](Gemini_Generated_Image_aohv54aohv54aohv.jpg)
 
-* **Mikrokontroller:** Arduino Uno (x1 eller x2 beroende på uppdelning)
-* **RFID-läsare:** MFRC522 (RC522)
-* **Klockmodul (RTC):** DS3231 (för exakt tidshållning)
-* **Display:** LCD 16x2 (gärna med I2C-modul)
-* **Motorer:** 2x Servomotorer (SG90 eller MG995 för bommar)
+### Hårdvara (Hardware)
 
-### Sensorer & Input
+* **Styrenhet (Klient):** ESP32 Dev Kit V1.
+* **Server (Backend):** Raspberry Pi Zero 2 W.
+* **Sensorer:** 2x RFID-RC522 (SPI), 4x HC-SR04 Ultraljudssensorer.
+* **Aktuatorer:** 2x Servomotorer (SG90/MG996R) för bommar, Piezo-summer.
+* **Display:** 2x LCD 1602 med I2C-moduler.
+* **Ström:** MB102 Power Supply Module (för stabil drift av motorer).
 
-* **IR-sensor:** För att detektera att en bil står vid ingången.
-* **Tryckknapp:** För att simulera betalning vid utgången.
-* **Summer (Piezo):** För ljudsignal vid scanning (valfritt).
-* **RFID-taggar:** Kort eller nyckelbrickor.
+### Mjukvara (Software)
 
----
-
-## 💾 Bibliotek
-
-Följande Arduino-bibliotek behövs för att koden ska fungera. Dessa kan installeras via *Library Manager* i Arduino IDE:
-
-* `SPI.h` (Kommunikation med RFID)
-* `MFRC522.h` (För RFID-läsaren)
-* `Wire.h` (I2C-kommunikation)
-* `RTClib.h` (För DS3231 klockan)
-* `LiquidCrystal_I2C.h` (För LCD-skärmen)
-* `Servo.h` (För bommarna)
+* **Språk:** C++ (Arduino Framework via PlatformIO).
+* **Databas:** Redis (körs i Docker).
+* **Filhantering:** LittleFS (för lokal buffring på ESP32).
+* **Kommunikation:** Wi-Fi (TCP/IP), SPI, I2C.
 
 ---
 
-## ⚙️ Så fungerar det (Logik)
+## 🔌 Kopplingsschema & Design
 
-Systemet bygger på en `struct` för att spara data om varje parkerad bil:
+Systemet är strikt uppdelat i frontend (sensorer) och backend (databas) för modularitet.
 
-```cpp
-struct Ticket {
-  String id;               // RFID-kortets unika ID
-  unsigned long startTid;  // Tidpunkt då bilen kom in (Unix tid)
-};
+![Circuit Diagram](Gemini_Generated_Image_yia37tyia37tyia3.jpg)
+
+### Tekniska Lösningar
+
+* **Spänningsdelning:** Ultraljudssensorernas 5V-signaler skalas ner till 3.3V med resistorer (1kΩ/2kΩ) för att skydda ESP32.
+* **Strömförsörjning:** Separat strömkälla för servomotorer för att undvika "brownouts" på mikrokontrollern.
+* **I2C:** Används för skärmarna för att minimera antalet GPIO-pinnar.
+
+---
+
+## 🚀 Utmaningar och Lösningar
+
+Under utvecklingen identifierades och löstes följande kritiska utmaningar:
+
+| Utmaning | Lösning |
+| :--- | :--- |
+| **Logiknivåer:** ESP32 (3.3V) vs Sensorer (5V) | Implementering av spänningsdelare på Echo-pinnarna. |
+| **Strömspikar:** Processorn startade om vid motoraktivitet | Separat MB102 strömförsörjning och kondensatorer. |
+| **Dataförlust:** Nätverksavbrott | **Store and Forward:** Data sparas till `/queue.txt` (LittleFS) och skickas när nätverket är tillbaka. |
+
+---
+
+## 🛠 Installation & Setup
+
+### 1. Server (Raspberry Pi)
+
+Kör Redis i en Docker-container:
+
+```bash
+docker run -d --name redis-stack -p 6379:6379 -v redis-data:/data redis/redis-stack:latest
