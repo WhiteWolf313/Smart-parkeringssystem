@@ -2,7 +2,7 @@
 
 > Ett driftsäkert parkeringssystem baserat på ESP32, RFID och Redis med offline-stöd.
 
-![System Overview](Skärmavbild 2026-02-14 kl. 20.13.53.png)
+![System Overview](System_Overview.png)
 
 ## 📖 Projektöversikt
 
