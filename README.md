@@ -2,7 +2,7 @@
 
 > Ett driftsäkert parkeringssystem baserat på ESP32, RFID och Redis med offline-stöd.
 
-![System Overview](Ska%CC%88rmavbild%202026-02-14%20kl.%2020.13.53.jpg)
+![System Overview](Skärmavbild 2026-02-14 kl. 20.13.53.png)
 
 ## 📖 Projektöversikt
 
@@ -24,7 +24,7 @@ Fokus ligger på att skapa en robust **"Edge Computing"**-lösning där systemet
 
 Systemet bygger på en klient-server-arkitektur där mikrokontrollern styr hårdvaran och servern hanterar datan.
 
-![System Architecture](Gemini_Generated_Image_aohv54aohv54aohv.jpg)
+![System Architecture](Gemini_Generated_Image_aohv54aohv54aohv.png)
 
 ### Hårdvara (Hardware)
 
@@ -48,7 +48,7 @@ Systemet bygger på en klient-server-arkitektur där mikrokontrollern styr hård
 
 Systemet är strikt uppdelat i frontend (sensorer) och backend (databas) för modularitet.
 
-![Circuit Diagram](Gemini_Generated_Image_yia37tyia37tyia3.jpg)
+![Circuit Diagram](Gemini_Generated_Image_yia37tyia37tyia3.png)
 
 ### Tekniska Lösningar
 
