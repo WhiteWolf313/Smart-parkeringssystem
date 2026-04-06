@@ -36,3 +36,15 @@
 #define TRIG_OUT_AFTER 26
 #define ECHO_OUT_AFTER 39
 
+// =======================================================
+// 1. INSTÄLLNINGAR & VARIABLER
+// =======================================================
+const char* ssid = "DITT_WIFI_NAMN";
+const char* password = "DITT_WIFI_LOSENORD";
+const char* redis_host = "192.168.1.100"; // ange IP för din ziro
+const int redis_port = 6379;
+const char* queueFile = "/queue.txt";
+
+int freeSpots = 50; 
+WiFiClient redisClient;
+
