@@ -1,0 +1,10 @@
+{
+  "name": "Rfid",
+  "version": "0.1.0",
+  "description": "Smart Parking System - dual MFRC522 reader (IN/OUT)",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": [
+    { "name": "MFRC522", "owner": "miguelbalboa", "version": "^1.4.11" }
+  ]
+}
