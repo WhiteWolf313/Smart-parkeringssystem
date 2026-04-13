@@ -5,6 +5,6 @@
   "frameworks": "arduino",
   "platforms": "espressif32",
   "dependencies": [
-    { "name": "MFRC522", "owner": "miguelbalboa", "version": "^1.4.11" }
+    { "name": "MFRC522", "owner": "miguelbalboa", "version": "^1.4.12" }
   ]
 }
