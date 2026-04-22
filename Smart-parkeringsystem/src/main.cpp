@@ -20,7 +20,7 @@
 #define BUZZER_PIN 2
 
 #define RST_IN_PIN 27
-#define RST_OUT_PIN 22 // Tillagd för den andra RFID-läsaren
+#define RST_OUT_PIN 27 // Tillagd för den andra RFID-läsaren
 #define SS_IN_PIN 5
 #define SS_OUT_PIN 4
 
