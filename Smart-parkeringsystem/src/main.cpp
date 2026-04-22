@@ -248,11 +248,19 @@ void loop() {
     unsigned long now = millis();
 
     // 1. Kontrollera inkommande bilar (RFID)
-    if (pollReader(readerIn, lastUidIn, lastSeenIn, uid)) {
-        Serial.printf("[CARD IN]  UID=%s\n", uid.c_str());
+if (pollReader(readerIn, lastUidIn, lastSeenIn, uid)) {
+    Serial.printf("[CARD IN]  UID=%s\n", uid.c_str());
+
+    if (occupiedSpaces >= totalSpaces) {
+        Serial.println("Parkeringen är full!");
+        beepOnce(500);            // lång pip = nekad
+    } else {
         beepTwice();
         openEntryGate();
+        occupiedSpaces++;         // ← uppdatera räknaren
+        refreshDisplays();        // ← rita om LCD
         // Här kan du lägga till logik för att stänga grinden när bilen passerat (med hjälp av inAfterSensor)
+    }
     }
 
     // 2. Kontrollera utgående bilar (RFID)
@@ -260,6 +268,11 @@ void loop() {
         Serial.printf("[CARD OUT] UID=%s\n", uid.c_str());
         beepTwice();
         openExitGate();
+
+        if (occupiedSpaces > 0) {
+            occupiedSpaces--;         // ← uppdatera räknaren
+        }
+        refreshDisplays();            // ← rita om LCD
         // Här kan du lägga till logik för att stänga grinden när bilen passerat (med hjälp av outAfterSensor)
     }
 
@@ -275,3 +288,4 @@ void loop() {
         */
     }
 }
+
