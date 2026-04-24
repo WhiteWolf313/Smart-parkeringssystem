@@ -13,7 +13,7 @@
 
 // OUT reader (exit gate)
 #define SS_OUT_PIN   4
-#define RST_OUT_PIN 22
+#define RST_OUT_PIN 27
 
 // ── Debounce setting ─────────────────────────────────────────────────────────
 #define DEBOUNCE_MS 1500
@@ -74,6 +74,7 @@ void setup() {
     Serial.printf("[RFID IN]  ver=0x%02X\n",
                   readerIn.PCD_ReadRegister(MFRC522::VersionReg));
 
+    readerOut.PCD_Init();
     readerOut.PCD_Init();
     readerOut.PCD_SetAntennaGain(MFRC522::RxGain_max);
     Serial.printf("[RFID OUT] ver=0x%02X\n",
