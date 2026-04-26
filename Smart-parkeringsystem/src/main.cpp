@@ -5,6 +5,7 @@
  */
 
 #include <Arduino.h>
+#include "esp_task_wdt.h"
 #include <Wire.h>
 #include <SPI.h>
 #include <MFRC522.h>
@@ -112,6 +113,9 @@ UltrasoundSensor outBeforeSensor(TRIG_OUT_BEFORE, ECHO_OUT_BEFORE);
 UltrasoundSensor outAfterSensor(TRIG_OUT_AFTER, ECHO_OUT_AFTER);
 unsigned long lastPrintAtMs = 0;
 bool carAtEntry = false;
+bool gateInOpen = false;
+bool carWasUnderInAfter = false;
+unsigned long gateOpenedAtMs = 0;
 
 // Atoshs inställningar (Servon)
 Servo gateIn;
@@ -165,11 +169,27 @@ void beepTwice() {
 
 // --- Grindar (Från Atosh) ---
 void servoInit() {
-    gateIn.attach(SERVO_IN_PIN); gateOut.attach(SERVO_OUT_PIN);
-    gateIn.write(0); gateOut.write(0);
+    gateIn.attach(SERVO_IN_PIN, 500, 2500);
+    gateOut.attach(SERVO_OUT_PIN, 500, 2500);
+    gateIn.writeMicroseconds(500);
+    gateOut.writeMicroseconds(500);
 }
-void openEntryGate() { gateIn.write(90); Serial.println("Entry gate opened"); beepOnce(250); }
-void closeEntryGate() { gateIn.write(0); Serial.println("Entry gate closed"); }
+void openEntryGate() {
+    for (int us = 500; us <= 1500; us += 15) {
+        gateIn.writeMicroseconds(us);
+        delay(15);
+    }
+    Serial.println("Entry gate opened");
+}
+void closeEntryGate() {
+    gateIn.attach(SERVO_IN_PIN, 500, 2500);
+    for (int us = 1500; us >= 500; us -= 15) {
+        gateIn.writeMicroseconds(us);
+        delay(15);
+    }
+    gateIn.writeMicroseconds(500);
+    Serial.println("Entry gate closed");
+}
 void openExitGate() { gateOut.write(90); Serial.println("Exit gate opened"); beepOnce(250); }
 void closeExitGate() { gateOut.write(0); Serial.println("Exit gate closed"); }
 
@@ -227,6 +247,7 @@ void setup() {
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
 
+    // Servo boot test: open then close
     // Initiera RFID
     readerIn.PCD_Init();
     readerOut.PCD_Init();
@@ -259,12 +280,15 @@ if (pollReader(readerIn, lastUidIn, lastSeenIn, uid)) {
         beepOnce(500);            // lång pip = nekad
     } else {
         beepTwice();
-        delay(2000);   // 1 second pause — adjust to taste
+        esp_task_wdt_reset();
+        delay(2000);
         openEntryGate();
+        gateInOpen = true;
+        gateOpenedAtMs = millis();
+        carWasUnderInAfter = false;
         occupiedSpaces++;
         carAtEntry = false;
         refreshDisplays();
-        // Här kan du lägga till logik för att stänga grinden när bilen passerat (med hjälp av inAfterSensor)
     }
     }
 
@@ -275,9 +299,10 @@ if (pollReader(readerIn, lastUidIn, lastSeenIn, uid)) {
         openExitGate();
 
         if (occupiedSpaces > 0) {
-            occupiedSpaces--;         // ← uppdatera räknaren
+            occupiedSpaces--;
         }
-        refreshDisplays();            // ← rita om LCD
+        Serial.printf("[EXIT] occupied=%d free=%d\n", occupiedSpaces, totalSpaces - occupiedSpaces);
+        refreshDisplays();
         // Här kan du lägga till logik för att stänga grinden när bilen passerat (med hjälp av outAfterSensor)
     }
 
@@ -301,6 +326,18 @@ if (pollReader(readerIn, lastUidIn, lastSeenIn, uid)) {
         } else if (!carDetected && carAtEntry) {
             carAtEntry = false;
             refreshDisplays();
+        }
+
+        if (gateInOpen && (millis() - gateOpenedAtMs > 3000)) {
+            float distAfter = inAfterSensor.readDistanceCm(kSamplesPerReading);
+            bool carUnderSensor = (distAfter != UltrasoundSensor::kInvalidDistanceCm && distAfter <= kCarPresentThresholdCm);
+            Serial.printf("[AFTER] dist=%.1f car=%s wasUnder=%s\n", distAfter, carUnderSensor?"yes":"no", carWasUnderInAfter?"yes":"no");
+            if (carUnderSensor) carWasUnderInAfter = true;
+            if (carWasUnderInAfter && !carUnderSensor) {
+                closeEntryGate();
+                gateInOpen = false;
+                carWasUnderInAfter = false;
+            }
         }
     }
     
