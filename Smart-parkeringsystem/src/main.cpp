@@ -1,357 +1,810 @@
-/*
- * SMART PARKING SYSTEM - PROFESSIONELL VERSION (SAMMANSLAGEN)
- * Hårdvara: ESP32 DevKitC V4, 2x RFID, 2x Servo, 2x LCD, 4x HC-SR04, 1x Buzzer
- * Databas: Redis via Wi-Fi (med LittleFS Offline-stöd)
- */
-
-#include <Arduino.h>
-#include "esp_task_wdt.h"
-#include <Wire.h>
 #include <SPI.h>
 #include <MFRC522.h>
 #include <ESP32Servo.h>
+#include <Wire.h>
 #include <LiquidCrystal_I2C.h>
-#include <WiFi.h>
-#include <LittleFS.h>
-#include <Redis.h>
 
 // =======================================================
-// 1. PIN-DEFINITIONER (Standardiserade)
+// PIN DEFINITIONS
 // =======================================================
+
+// -------- RFID (Same RST pin as your working code) --------
+#define SS_ENTRY_PIN 5
+#define SS_EXIT_PIN 4
+#define RST_PIN 27  // Same RST for both readers
+
+// -------- Servo --------
+#define SERVO_ENTRY_PIN 13
+#define SERVO_EXIT_PIN 14
+
+// -------- LCD --------
+#define LCD_ENTRY_ADDR 0x27
+#define LCD_EXIT_ADDR 0x26
+
+// -------- Buzzer --------
 #define BUZZER_PIN 2
 
-#define RST_IN_PIN 27
-#define RST_OUT_PIN 27 // Tillagd för den andra RFID-läsaren
-#define SS_IN_PIN 5
-#define SS_OUT_PIN 4
+// -------- Ultrasonic Sensors for Car Detection --------
+// Entry sensors (before and after gate)
+#define TRIG_ENTRY_BEFORE 32
+#define ECHO_ENTRY_BEFORE 34
+#define TRIG_ENTRY_AFTER 33
+#define ECHO_ENTRY_AFTER 35
 
-#define SERVO_IN_PIN 13
-#define SERVO_OUT_PIN 14
-
-#define TRIG_IN_BEFORE 32
-#define ECHO_IN_BEFORE 34
-#define TRIG_IN_AFTER 33
-#define ECHO_IN_AFTER 35
-
-#define TRIG_OUT_BEFORE 25
-#define ECHO_OUT_BEFORE 36
-#define TRIG_OUT_AFTER 26
-#define ECHO_OUT_AFTER 39
+// Exit sensors (before and after gate)
+#define TRIG_EXIT_BEFORE 25
+#define ECHO_EXIT_BEFORE 36
+#define TRIG_EXIT_AFTER 16
+#define ECHO_EXIT_AFTER 39
 
 // =======================================================
-// 2. KLASSER & OBJEKT (Sensorklass för Khalids kod)
+// GLOBAL OBJECTS
 // =======================================================
-class UltrasoundSensor {
-private:
-    uint8_t trigPin;
-    uint8_t echoPin;
 
-public:
-    static constexpr float kInvalidDistanceCm = -1.0f;
+MFRC522 rfidEntry(SS_ENTRY_PIN, RST_PIN);
+MFRC522 rfidExit(SS_EXIT_PIN, RST_PIN);
 
-    UltrasoundSensor(uint8_t trig, uint8_t echo) : trigPin(trig), echoPin(echo) {}
+Servo servoEntry;
+Servo servoExit;
 
-    void begin() {
-        pinMode(trigPin, OUTPUT);
-        pinMode(echoPin, INPUT);
-    }
-
-    float readDistanceCm(uint8_t samples = 1) {
-        float totalDistance = 0;
-        int validSamples = 0;
-
-        for (uint8_t i = 0; i < samples; i++) {
-            digitalWrite(trigPin, LOW);
-            delayMicroseconds(2);
-            digitalWrite(trigPin, HIGH);
-            delayMicroseconds(10);
-            digitalWrite(trigPin, LOW);
-
-            long duration = pulseIn(echoPin, HIGH, 30000);
-            if (duration > 0) {
-                totalDistance += (duration * 0.034f / 2.0f);
-                validSamples++;
-            }
-            delay(5); // Kort paus mellan mätningar
-        }
-
-        if (validSamples == 0) return kInvalidDistanceCm;
-        return totalDistance / validSamples;
-    }
-};
+LiquidCrystal_I2C lcdEntry(LCD_ENTRY_ADDR, 16, 2);
+LiquidCrystal_I2C lcdExit(LCD_EXIT_ADDR, 16, 2);
 
 // =======================================================
-// 3. INSTÄLLNINGAR, VARIABLER & OBJEKT
+// PARKING SLOTS
 // =======================================================
-// Yousifs inställningar (WiFi & Redis)
-const char* ssid = "DITT_WIFI_NAMN";
-const char* password = "DITT_WIFI_LOSENORD";
-const char* redis_host = "192.168.1.100";
-const int redis_port = 6379;
-const char* queueFile = "/queue.txt";
-WiFiClient redisClient;
-
-// Mohameds inställningar (Skärmar & Platser)
-LiquidCrystal_I2C lcdIn(0x27, 16, 2);
 int totalSpaces = 10;
 int occupiedSpaces = 4;
 
-// Stars inställningar (RFID)
-#define DEBOUNCE_MS 1500
-MFRC522 readerIn(SS_IN_PIN, RST_IN_PIN);
-MFRC522 readerOut(SS_OUT_PIN, RST_OUT_PIN);
-String lastUidIn, lastUidOut;
-uint32_t lastSeenIn = 0, lastSeenOut = 0;
-
-// Khalids inställningar (Sensorer)
-constexpr unsigned long kPrintIntervalMs = 300UL;
-constexpr float kCarPresentThresholdCm = 15.0f;
-constexpr uint8_t kSamplesPerReading = 3;
-UltrasoundSensor inBeforeSensor(TRIG_IN_BEFORE, ECHO_IN_BEFORE);
-UltrasoundSensor inAfterSensor(TRIG_IN_AFTER, ECHO_IN_AFTER);
-UltrasoundSensor outBeforeSensor(TRIG_OUT_BEFORE, ECHO_OUT_BEFORE);
-UltrasoundSensor outAfterSensor(TRIG_OUT_AFTER, ECHO_OUT_AFTER);
-unsigned long lastPrintAtMs = 0;
-bool carAtEntry = false;
-bool gateInOpen = false;
-bool carWasUnderInAfter = false;
-unsigned long gateOpenedAtMs = 0;
-
-// Atoshs inställningar (Servon)
-Servo gateIn;
-Servo gateOut;
+// =======================================================
+// FUNCTION: Get distance from ultrasonic sensor
+// =======================================================
+long getDistance(int trig, int echo) {
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+  long duration = pulseIn(echo, HIGH, 30000);
+  if (duration == 0) return 999;
+  return duration * 0.034 / 2;
+}
 
 // =======================================================
-// 4. HJÄLPFUNKTIONER
+// FUNCTION: Check if car is present (within 15cm)
 // =======================================================
-
-// --- Skärmar ---
-void refreshDisplays() {
-  int available = totalSpaces - occupiedSpaces;
-  lcdIn.clear();
-  if (available <= 0) {
-    lcdIn.setCursor(0, 0); lcdIn.print("Parkeringen");
-    lcdIn.setCursor(0, 1); lcdIn.print("ar full!");
-  } else {
-    lcdIn.setCursor(0, 0); lcdIn.print("Welcome!");
-    lcdIn.setCursor(0, 1); lcdIn.print("Spaces: "); lcdIn.print(available);
-  }
-
+bool isCarPresent(int trig, int echo) {
+  long distance = getDistance(trig, echo);
+  return (distance < 15);
 }
 
-// --- WiFi & Databas ---
-void connectWiFi() {
-  Serial.print("Ansluter till Wi-Fi...");
-  WiFi.begin(ssid, password);
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 10) {
-    delay(500); Serial.print("."); attempts++;
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println(" OK! IP: " + WiFi.localIP().toString());
-  } else {
-    Serial.println(" OFFLINE! Fortsätter utan internet.");
+// =======================================================
+// FUNCTION: Beep patterns (ONLY for RFID)
+// =======================================================
+void beepSuccess() {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(200);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void beepError() {
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(200);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(200);
   }
 }
 
-// --- Ljud & Buzzer (Från Desmond) ---
-// Pleasant single beep (accepted / entry)
-void beepOnce(int durationMs = 120) {
-  tone(BUZZER_PIN, 1800, durationMs);
-  delay(durationMs + 10);
+void beepGateOpen() {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(150);
+  digitalWrite(BUZZER_PIN, LOW);
+  delay(100);
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(150);
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
-// Two rising beeps (success / gate open)
-void beepTwice() {
-  tone(BUZZER_PIN, 1200, 100); delay(150);
-  tone(BUZZER_PIN, 1800, 100); delay(150);
-}
-
-// --- Grindar (Från Atosh) ---
-void servoInit() {
-    gateIn.attach(SERVO_IN_PIN, 500, 2500);
-    gateOut.attach(SERVO_OUT_PIN, 500, 2500);
-    gateIn.writeMicroseconds(500);
-    gateOut.writeMicroseconds(500);
-}
+// =======================================================
+// FUNCTION: Open/Close Entry Gate
+// =======================================================
 void openEntryGate() {
-    for (int us = 500; us <= 1500; us += 15) {
-        gateIn.writeMicroseconds(us);
-        delay(15);
-    }
-    Serial.println("Entry gate opened");
+  Serial.println("[ENTRY GATE] Opening...");
+  beepGateOpen();
+  servoEntry.write(90);
 }
+
 void closeEntryGate() {
-    gateIn.attach(SERVO_IN_PIN, 500, 2500);
-    for (int us = 1500; us >= 500; us -= 15) {
-        gateIn.writeMicroseconds(us);
-        delay(15);
-    }
-    gateIn.writeMicroseconds(500);
-    Serial.println("Entry gate closed");
-}
-void openExitGate() { gateOut.write(90); Serial.println("Exit gate opened"); beepOnce(250); }
-void closeExitGate() { gateOut.write(0); Serial.println("Exit gate closed"); }
-
-// --- RFID (Från Star) ---
-String uidToHex(MFRC522::Uid &uid) {
-    String s;
-    for (byte i = 0; i < uid.size; i++) {
-        if (uid.uidByte[i] < 0x10) s += '0';
-        s += String(uid.uidByte[i], HEX);
-    }
-    s.toUpperCase(); return s;
-}
-
-bool pollReader(MFRC522 &mfrc, String &lastUid, uint32_t &lastSeen, String &outUid) {
-    if (!mfrc.PICC_IsNewCardPresent() || !mfrc.PICC_ReadCardSerial()) return false;
-    String uid = uidToHex(mfrc.uid);
-    mfrc.PICC_HaltA(); mfrc.PCD_StopCrypto1();
-
-    uint32_t now = millis();
-    if (uid == lastUid && (now - lastSeen) < DEBOUNCE_MS) {
-        lastSeen = now; return false;
-    }
-    lastUid = uid; lastSeen = now; outUid = uid;
-    return true;
-}
-
-// --- Sensorer (Från Khalid) ---
-void printSensorState(const char* name, UltrasoundSensor& sensor) {
-    float distance = sensor.readDistanceCm(kSamplesPerReading);
-    bool present = (distance != UltrasoundSensor::kInvalidDistanceCm && distance <= kCarPresentThresholdCm);
-    Serial.printf("%s: ", name);
-    if (distance == UltrasoundSensor::kInvalidDistanceCm) Serial.print("no reading");
-    else Serial.printf("%.1f cm", distance);
-    Serial.printf(" | car=%s\n", present ? "yes" : "no");
+  Serial.println("[ENTRY GATE] Closing...");
+  servoEntry.write(0);
 }
 
 // =======================================================
-// 5. HUVUDPROGRAM (SETUP & LOOP)
+// FUNCTION: Open/Close Exit Gate  
+// =======================================================
+void openExitGate() {
+  Serial.println("[EXIT GATE] Opening...");
+  beepGateOpen();
+  servoExit.write(90);
+}
+
+void closeExitGate() {
+  Serial.println("[EXIT GATE] Closing...");
+  servoExit.write(0);
+}
+
+// =======================================================
+// FUNCTION: Update LCD displays
+// =======================================================
+void updateEntryLCD() {
+  int availableSpaces = totalSpaces - occupiedSpaces;
+  
+  lcdEntry.clear();
+  lcdEntry.setCursor(0, 0);
+  lcdEntry.print("Welcome!");
+  lcdEntry.setCursor(0, 1);
+  lcdEntry.print("Free: ");
+  lcdEntry.print(availableSpaces);
+  lcdEntry.print("/");
+  lcdEntry.print(totalSpaces);
+}
+
+void updateExitLCD() {
+  int availableSpaces = totalSpaces - occupiedSpaces;
+  
+  lcdExit.clear();
+  lcdExit.setCursor(0, 0);
+  lcdExit.print("Exit Ready");
+  lcdExit.setCursor(0, 1);
+  lcdExit.print("Free: ");
+  lcdExit.print(availableSpaces);
+  lcdExit.print("/");
+  lcdExit.print(totalSpaces);
+}
+
+// =======================================================
+// SETUP
 // =======================================================
 void setup() {
-    Serial.begin(115200);
-    delay(200);
-    Serial.println("\n[BOOT] Smart Parking System");
-
-    // Initiera I2C och SPI
-    Wire.begin(); 
-    SPI.begin(); // Använder standard SPI-pins
-
-    // Initiera Skärmar
-    lcdIn.init(); lcdIn.backlight();
-    refreshDisplays();
-
-    // Initiera Servon och Buzzer
-    servoInit();
-    pinMode(BUZZER_PIN, OUTPUT);
-    digitalWrite(BUZZER_PIN, LOW);
-
-    // Servo boot test: open then close
-    // Initiera RFID
-    readerIn.PCD_Init();
-    readerOut.PCD_Init();
-    Serial.println("[RFID] ready");
-
-    // Initiera Sensorer
-    inBeforeSensor.begin();
-    inAfterSensor.begin();
-    outBeforeSensor.begin();
-    outAfterSensor.begin();
-    Serial.println("[ULTRASOUND] ready");
-
-    // Initiera Nätverk (LittleFS och WiFi)
-    if (!LittleFS.begin(true)) {
-      Serial.println("Kritiskt fel: Kunde inte starta LittleFS!");
-    }
-    connectWiFi();
+  Serial.begin(115200);
+  Serial.println("\n========================================");
+  Serial.println("PARKING SYSTEM - CORRECTED VERSION");
+  Serial.println("========================================\n");
+  
+  // Initialize SPI
+  SPI.begin();
+  
+  // Initialize RFID readers
+  rfidEntry.PCD_Init();
+  rfidExit.PCD_Init();
+  Serial.println("[RFID] Both readers initialized");
+  
+  // Initialize servos
+  servoEntry.attach(SERVO_ENTRY_PIN);
+  servoExit.attach(SERVO_EXIT_PIN);
+  servoEntry.write(0);
+  servoExit.write(0);
+  Serial.println("[SERVO] Servos initialized");
+  
+  // Initialize LCDs
+  lcdEntry.init();
+  lcdEntry.backlight();
+  lcdExit.init();
+  lcdExit.backlight();
+  Serial.println("[LCD] Displays initialized");
+  
+  // Initialize buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  
+  // Initialize ultrasonic sensors
+  pinMode(TRIG_ENTRY_BEFORE, OUTPUT); pinMode(ECHO_ENTRY_BEFORE, INPUT);
+  pinMode(TRIG_ENTRY_AFTER, OUTPUT);  pinMode(ECHO_ENTRY_AFTER, INPUT);
+  pinMode(TRIG_EXIT_BEFORE, OUTPUT);  pinMode(ECHO_EXIT_BEFORE, INPUT);
+  pinMode(TRIG_EXIT_AFTER, OUTPUT);   pinMode(ECHO_EXIT_AFTER, INPUT);
+  Serial.println("[ULTRASONIC] Car detection sensors initialized");
+  
+  // Initial display
+  updateEntryLCD();
+  updateExitLCD();
+  
+  Serial.println("\n[SYSTEM] READY!");
+  Serial.println("Entry RFID -> Opens ENTRY gate");
+  Serial.println("Exit RFID -> Opens EXIT gate");
+  Serial.println("========================================\n");
 }
 
+// =======================================================
+// MAIN LOOP
+// =======================================================
 void loop() {
-    String uid;
-    unsigned long now = millis();
-
-    // 1. Kontrollera inkommande bilar (RFID)
-if (pollReader(readerIn, lastUidIn, lastSeenIn, uid)) {
-    Serial.printf("[CARD IN]  UID=%s\n", uid.c_str());
-
-    if (occupiedSpaces >= totalSpaces) {
-        Serial.println("Parkeringen är full!");
-        beepOnce(500);            // lång pip = nekad
-    } else {
-        beepTwice();
-        esp_task_wdt_reset();
-        delay(2000);
-        openEntryGate();
-        gateInOpen = true;
-        gateOpenedAtMs = millis();
-        carWasUnderInAfter = false;
+  // Update available spaces display
+  int availableSpaces = totalSpaces - occupiedSpaces;
+  
+  // ========== CHECK FOR CAR AT ENTRY (BEFORE SENSOR) ==========
+  bool carAtEntryBefore = isCarPresent(TRIG_ENTRY_BEFORE, ECHO_ENTRY_BEFORE);
+  
+  if (carAtEntryBefore) {
+    // Show scan card message on entry LCD
+    lcdEntry.clear();
+    lcdEntry.setCursor(0, 0);
+    lcdEntry.print("Welcome!");
+    lcdEntry.setCursor(0, 1);
+    lcdEntry.print("Scan Your Card");
+    // NO BEEP HERE - Only RFID triggers beep
+  } else {
+    // Show normal entry display
+    updateEntryLCD();
+  }
+  
+  // ========== CHECK FOR CAR AT EXIT (BEFORE SENSOR) ==========
+  bool carAtExitBefore = isCarPresent(TRIG_EXIT_BEFORE, ECHO_EXIT_BEFORE);
+  
+  if (carAtExitBefore) {
+    // Show scan card message on exit LCD
+    lcdExit.clear();
+    lcdExit.setCursor(0, 0);
+    lcdExit.print("Goodbye!");
+    lcdExit.setCursor(0, 1);
+    lcdExit.print("Scan Your Card");
+    // NO BEEP HERE - Only RFID triggers beep
+  } else {
+    // Show normal exit display (Exit Ready)
+    updateExitLCD();
+  }
+  
+  // ========== ENTRY RFID CARD DETECTED ==========
+  if (rfidEntry.PICC_IsNewCardPresent() && rfidEntry.PICC_ReadCardSerial()) {
+    Serial.println("\n>>> [ENTRY RFID] Card detected <<<");
+    
+    if (occupiedSpaces < totalSpaces) {
+      // Success - Open entry gate
+      lcdEntry.clear();
+      lcdEntry.setCursor(0, 0);
+      lcdEntry.print("Access Granted");
+      lcdEntry.setCursor(0, 1);
+      lcdEntry.print("Gate Opening...");
+      
+      beepSuccess();  // Success beep for valid card
+      openEntryGate();
+      
+      // Wait for car to enter (using AFTER sensor)
+      unsigned long gateOpenTime = millis();
+      bool carEntered = false;
+      
+      lcdEntry.clear();
+      lcdEntry.setCursor(0, 0);
+      lcdEntry.print("Gate Open");
+      lcdEntry.setCursor(0, 1);
+      lcdEntry.print("Please Enter");
+      
+      while (millis() - gateOpenTime < 10000) {
+        if (isCarPresent(TRIG_ENTRY_AFTER, ECHO_ENTRY_AFTER)) {
+          carEntered = true;
+          Serial.println("[ENTRY] Car detected at AFTER sensor");
+          lcdEntry.clear();
+          lcdEntry.setCursor(0, 0);
+          lcdEntry.print("Car Detected");
+          lcdEntry.setCursor(0, 1);
+          lcdEntry.print("Please Proceed");
+          break;
+        }
+        delay(50);
+      }
+      
+      if (carEntered) {
+        // Wait for car to clear the gate
+        while (isCarPresent(TRIG_ENTRY_AFTER, ECHO_ENTRY_AFTER)) {
+          delay(50);
+        }
         occupiedSpaces++;
-        carAtEntry = false;
-        refreshDisplays();
-    }
-    }
-
-    // 2. Kontrollera utgående bilar (RFID)
-    if (pollReader(readerOut, lastUidOut, lastSeenOut, uid)) {
-        Serial.printf("[CARD OUT] UID=%s\n", uid.c_str());
-        beepTwice();
-        openExitGate();
-
-        if (occupiedSpaces > 0) {
-            occupiedSpaces--;
-        }
-        Serial.printf("[EXIT] occupied=%d free=%d\n", occupiedSpaces, totalSpaces - occupiedSpaces);
-        refreshDisplays();
-        // Här kan du lägga till logik för att stänga grinden när bilen passerat (med hjälp av outAfterSensor)
-    }
-
-    // 3. Kontrollera sensor vid ingången och uppdatera LCD
-    if (now - lastPrintAtMs >= kPrintIntervalMs) {
-        lastPrintAtMs = now;
-
-        float distInBefore = inBeforeSensor.readDistanceCm(kSamplesPerReading);
-        bool carDetected = (distInBefore != UltrasoundSensor::kInvalidDistanceCm && distInBefore <= kCarPresentThresholdCm);
-
-        if (carDetected && !carAtEntry) {
-            carAtEntry = true;
-            lcdIn.clear();
-            if (occupiedSpaces >= totalSpaces) {
-                lcdIn.setCursor(0, 0); lcdIn.print("Parkeringen");
-                lcdIn.setCursor(0, 1); lcdIn.print("ar full!");
-            } else {
-                lcdIn.setCursor(0, 0); lcdIn.print("Welcome!");
-                lcdIn.setCursor(0, 1); lcdIn.print("Scan your card");
-            }
-        } else if (!carDetected && carAtEntry) {
-            carAtEntry = false;
-            refreshDisplays();
-        }
-
-        if (gateInOpen && (millis() - gateOpenedAtMs > 3000)) {
-            float distAfter = inAfterSensor.readDistanceCm(kSamplesPerReading);
-            bool carUnderSensor = (distAfter != UltrasoundSensor::kInvalidDistanceCm && distAfter <= kCarPresentThresholdCm);
-            Serial.printf("[AFTER] dist=%.1f car=%s wasUnder=%s\n", distAfter, carUnderSensor?"yes":"no", carWasUnderInAfter?"yes":"no");
-            if (carUnderSensor) carWasUnderInAfter = true;
-            if (carWasUnderInAfter && !carUnderSensor) {
-                closeEntryGate();
-                gateInOpen = false;
-                carWasUnderInAfter = false;
-            }
-        }
+        Serial.printf("[ENTRY] Car entered. Occupied: %d/%d\n", occupiedSpaces, totalSpaces);
+      }
+      
+      closeEntryGate();
+      updateEntryLCD();
+      updateExitLCD();
+      
+      // Show success message
+      lcdEntry.clear();
+      lcdEntry.setCursor(0, 0);
+      lcdEntry.print("Welcome!");
+      lcdEntry.setCursor(0, 1);
+      lcdEntry.print("Drive Safely!");
+      delay(2000);
+      updateEntryLCD();
+      
+    } else {
+      // Parking full
+      lcdEntry.clear();
+      lcdEntry.setCursor(0, 0);
+      lcdEntry.print("PARKING FULL");
+      lcdEntry.setCursor(0, 1);
+      lcdEntry.print("Access Denied");
+      
+      beepError();  // Error beep for denied access
+      delay(2000);
+      updateEntryLCD();
     }
     
-
-
-        // 3. Debug-utskrift av sensorer (körs bara ibland för att inte spamma)
-    if (now - lastPrintAtMs >= kPrintIntervalMs) {
-        lastPrintAtMs = now;
-        /* Avkommentera nedan för att se live-data från ultraljudssensorerna i konsolen:*/
-        printSensorState("IN_BEFORE", inBeforeSensor);
-        printSensorState("IN_AFTER", inAfterSensor);
-        printSensorState("OUT_BEFORE", outBeforeSensor);
-        printSensorState("OUT_AFTER", outAfterSensor);
-        Serial.println("---");
-        
+    rfidEntry.PICC_HaltA();
+    delay(500);
+  }
+  
+  // ========== EXIT RFID CARD DETECTED ==========
+  if (rfidExit.PICC_IsNewCardPresent() && rfidExit.PICC_ReadCardSerial()) {
+    Serial.println("\n>>> [EXIT RFID] Card detected <<<");
+    
+    if (occupiedSpaces > 0) {
+      // Success - Open exit gate
+      lcdExit.clear();
+      lcdExit.setCursor(0, 0);
+      lcdExit.print("Access Granted");
+      lcdExit.setCursor(0, 1);
+      lcdExit.print("Gate Opening...");
+      
+      beepSuccess();  // Success beep for valid card
+      openExitGate();
+      
+      // Wait for car to exit (using AFTER sensor)
+      unsigned long gateOpenTime = millis();
+      bool carExited = false;
+      
+      lcdExit.clear();
+      lcdExit.setCursor(0, 0);
+      lcdExit.print("Gate Open");
+      lcdExit.setCursor(0, 1);
+      lcdExit.print("Please Exit");
+      
+      while (millis() - gateOpenTime < 10000) {
+        if (isCarPresent(TRIG_EXIT_AFTER, ECHO_EXIT_AFTER)) {
+          carExited = true;
+          Serial.println("[EXIT] Car detected at AFTER sensor");
+          lcdExit.clear();
+          lcdExit.setCursor(0, 0);
+          lcdExit.print("Car Detected");
+          lcdExit.setCursor(0, 1);
+          lcdExit.print("Please Proceed");
+          break;
+        }
+        delay(50);
+      }
+      
+      if (carExited) {
+        // Wait for car to clear the gate
+        while (isCarPresent(TRIG_EXIT_AFTER, ECHO_EXIT_AFTER)) {
+          delay(50);
+        }
+        occupiedSpaces--;
+        Serial.printf("[EXIT] Car exited. Occupied: %d/%d\n", occupiedSpaces, totalSpaces);
+      }
+      
+      closeExitGate();
+      updateEntryLCD();
+      updateExitLCD();
+      
+      // Show goodbye message
+      lcdExit.clear();
+      lcdExit.setCursor(0, 0);
+      lcdExit.print("Goodbye!");
+      lcdExit.setCursor(0, 1);
+      lcdExit.print("Drive Safely!");
+      delay(2000);
+      updateExitLCD();
+      
+    } else {
+      // No cars to exit
+      lcdExit.clear();
+      lcdExit.setCursor(0, 0);
+      lcdExit.print("No Cars");
+      lcdExit.setCursor(0, 1);
+      lcdExit.print("to Exit!");
+      
+      beepError();  // Error beep for invalid exit
+      delay(2000);
+      updateExitLCD();
     }
+    
+    rfidExit.PICC_HaltA();
+    delay(500);
+  }
+  
+  // Debug output every 3 seconds
+  static unsigned long lastDebug = 0;
+  if (millis() - lastDebug > 3000) {
+    lastDebug = millis();
+    Serial.printf("\n[DEBUG] Occupied: %d/%d\n", occupiedSpaces, totalSpaces);
+    Serial.printf("  Entry Before: %s, After: %s\n", 
+      isCarPresent(TRIG_ENTRY_BEFORE, ECHO_ENTRY_BEFORE) ? "CAR" : "CLEAR",
+      isCarPresent(TRIG_ENTRY_AFTER, ECHO_ENTRY_AFTER) ? "CAR" : "CLEAR");
+    Serial.printf("  Exit Before: %s, After: %s\n", 
+      isCarPresent(TRIG_EXIT_BEFORE, ECHO_EXIT_BEFORE) ? "CAR" : "CLEAR",
+      isCarPresent(TRIG_EXIT_AFTER, ECHO_EXIT_AFTER) ? "CAR" : "CLEAR");
+    Serial.println("----------------------------------------\n");
+  }
+  
+  delay(100);
 }
+
+
+
+/*
+
+#include <SPI.h>
+#include <MFRC522.h>
+#include <ESP32Servo.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// =======================================================
+// PIN DEFINITIONS
+// =======================================================
+
+// -------- RFID (Same RST pin as your working code) --------
+#define SS_ENTRY_PIN 5
+#define SS_EXIT_PIN 4
+#define RST_PIN 27  // Same RST for both readers
+
+// -------- Servo --------
+#define SERVO_ENTRY_PIN 13
+#define SERVO_EXIT_PIN 14
+
+// -------- LCD --------
+#define LCD_ENTRY_ADDR 0x27
+#define LCD_EXIT_ADDR 0x26
+
+// -------- Buzzer --------
+#define BUZZER_PIN 2
+
+// -------- Ultrasonic Sensors for Car Detection --------
+// Entry sensors (before and after gate)
+#define TRIG_ENTRY_BEFORE 32
+#define ECHO_ENTRY_BEFORE 34
+#define TRIG_ENTRY_AFTER 33
+#define ECHO_ENTRY_AFTER 35
+
+// Exit sensors (before and after gate)
+#define TRIG_EXIT_BEFORE 25
+#define ECHO_EXIT_BEFORE 36
+#define TRIG_EXIT_AFTER 16
+#define ECHO_EXIT_AFTER 39
+
+// =======================================================
+// GLOBAL OBJECTS
+// =======================================================
+
+MFRC522 rfidEntry(SS_ENTRY_PIN, RST_PIN);
+MFRC522 rfidExit(SS_EXIT_PIN, RST_PIN);
+
+Servo servoEntry;
+Servo servoExit;
+
+LiquidCrystal_I2C lcdEntry(LCD_ENTRY_ADDR, 16, 2);
+LiquidCrystal_I2C lcdExit(LCD_EXIT_ADDR, 16, 2);
+
+// =======================================================
+// PARKING SLOTS (Fixed number, no ultrasonic for slots)
+// =======================================================
+int totalSpaces = 10;
+int occupiedSpaces = 4;
+
+// =======================================================
+// FUNCTION: Get distance from ultrasonic sensor
+// =======================================================
+long getDistance(int trig, int echo) {
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+  long duration = pulseIn(echo, HIGH, 30000);
+  if (duration == 0) return 999;
+  return duration * 0.034 / 2;
+}
+
+// =======================================================
+// FUNCTION: Check if car is present (within 15cm)
+// =======================================================
+bool isCarPresent(int trig, int echo) {
+  long distance = getDistance(trig, echo);
+  return (distance < 15);
+}
+
+// =======================================================
+// FUNCTION: Beep patterns
+// =======================================================
+void beepSuccess() {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(200);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void beepError() {
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(200);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(200);
+  }
+}
+
+
+// =======================================================
+// FUNCTION: Open/Close Entry Gate
+// =======================================================
+void openEntryGate() {
+  Serial.println("[ENTRY GATE] Opening...");
+  servoEntry.write(90);
+}
+
+void closeEntryGate() {
+  Serial.println("[ENTRY GATE] Closing...");
+  servoEntry.write(0);
+}
+
+// =======================================================
+// FUNCTION: Open/Close Exit Gate  
+// =======================================================
+void openExitGate() {
+  Serial.println("[EXIT GATE] Opening...");
+  servoExit.write(90);
+}
+
+void closeExitGate() {
+  Serial.println("[EXIT GATE] Closing...");
+  servoExit.write(0);
+}
+
+// =======================================================
+// FUNCTION: Update LCD displays
+// =======================================================
+void updateDisplays() {
+  int availableSpaces = totalSpaces - occupiedSpaces;
+  
+  // Entry LCD
+  lcdEntry.clear();
+  lcdEntry.setCursor(0, 0);
+  lcdEntry.print("Welcome!");
+  lcdEntry.setCursor(0, 1);
+  lcdEntry.print("Free: ");
+  lcdEntry.print(availableSpaces);
+  lcdEntry.print("/");
+  lcdEntry.print(totalSpaces);
+  
+  // Exit LCD
+  lcdExit.clear();
+  lcdExit.setCursor(0, 0);
+  lcdExit.print("Exit Ready");
+  lcdExit.setCursor(0, 1);
+  lcdExit.print("Free: ");
+  lcdExit.print(availableSpaces);
+  lcdExit.print("/");
+  lcdExit.print(totalSpaces);
+}
+
+// =======================================================
+// SETUP
+// =======================================================
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n========================================");
+  Serial.println("PARKING SYSTEM - CAR DETECTION VERSION");
+  Serial.println("========================================\n");
+  
+  // Initialize SPI
+  SPI.begin();
+  
+  // Initialize RFID readers
+  rfidEntry.PCD_Init();
+  rfidExit.PCD_Init();
+  Serial.println("[RFID] Both readers initialized");
+  
+  // Initialize servos
+  servoEntry.attach(SERVO_ENTRY_PIN);
+  servoExit.attach(SERVO_EXIT_PIN);
+  servoEntry.write(0);
+  servoExit.write(0);
+  Serial.println("[SERVO] Servos initialized");
+  
+  // Initialize LCDs
+  lcdEntry.init();
+  lcdEntry.backlight();
+  lcdExit.init();
+  lcdExit.backlight();
+  Serial.println("[LCD] Displays initialized");
+  
+  // Initialize buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  
+  // Initialize ultrasonic sensors
+  pinMode(TRIG_ENTRY_BEFORE, OUTPUT); pinMode(ECHO_ENTRY_BEFORE, INPUT);
+  pinMode(TRIG_ENTRY_AFTER, OUTPUT);  pinMode(ECHO_ENTRY_AFTER, INPUT);
+  pinMode(TRIG_EXIT_BEFORE, OUTPUT);  pinMode(ECHO_EXIT_BEFORE, INPUT);
+  pinMode(TRIG_EXIT_AFTER, OUTPUT);   pinMode(ECHO_EXIT_AFTER, INPUT);
+  Serial.println("[ULTRASONIC] Car detection sensors initialized");
+  
+  // Initial display
+  updateDisplays();
+  
+  Serial.println("\n[SYSTEM] READY!");
+  Serial.println("Entry RFID -> Opens ENTRY gate");
+  Serial.println("Exit RFID -> Opens EXIT gate");
+  Serial.println("========================================\n");
+}
+
+// =======================================================
+// MAIN LOOP
+// =======================================================
+void loop() {
+  // ========== ENTRY RFID CARD DETECTED ==========
+  if (rfidEntry.PICC_IsNewCardPresent() && rfidEntry.PICC_ReadCardSerial()) {
+    Serial.println("\n>>> [ENTRY RFID] Card detected <<<");
+    
+    if (occupiedSpaces < totalSpaces) {
+      // Success - Open entry gate
+      lcdEntry.clear();
+      lcdEntry.setCursor(0, 0);
+      lcdEntry.print("Access Granted");
+      lcdEntry.setCursor(0, 1);
+      lcdEntry.print("Gate Opening...");
+      
+      beepSuccess();
+      openEntryGate();
+      
+      // Wait for car to enter (using AFTER sensor)
+      unsigned long gateOpenTime = millis();
+      bool carEntered = false;
+      
+      while (millis() - gateOpenTime < 10000) {
+        if (isCarPresent(TRIG_ENTRY_AFTER, ECHO_ENTRY_AFTER)) {
+          carEntered = true;
+          Serial.println("[ENTRY] Car detected at AFTER sensor");
+          break;
+        }
+        delay(50);
+      }
+      
+      if (carEntered) {
+        // Wait for car to clear the gate
+        while (isCarPresent(TRIG_ENTRY_AFTER, ECHO_ENTRY_AFTER)) {
+          delay(50);
+        }
+        occupiedSpaces++;
+        Serial.printf("[ENTRY] Car entered. Occupied: %d/%d\n", occupiedSpaces, totalSpaces);
+      }
+      
+      closeEntryGate();
+      updateDisplays();
+      
+    } else {
+      // Parking full
+      lcdEntry.clear();
+      lcdEntry.setCursor(0, 0);
+      lcdEntry.print("PARKING FULL");
+      lcdEntry.setCursor(0, 1);
+      lcdEntry.print("Access Denied");
+      
+      beepError();
+    }
+    
+    rfidEntry.PICC_HaltA();
+    delay(1000);
+  }
+  
+  // ========== EXIT RFID CARD DETECTED ==========
+  if (rfidExit.PICC_IsNewCardPresent() && rfidExit.PICC_ReadCardSerial()) {
+    Serial.println("\n>>> [EXIT RFID] Card detected <<<");
+    
+    if (occupiedSpaces > 0) {
+      // Success - Open exit gate
+      lcdExit.clear();
+      lcdExit.setCursor(0, 0);
+      lcdExit.print("Access Granted");
+      lcdExit.setCursor(0, 1);
+      lcdExit.print("Gate Opening...");
+      
+      beepSuccess();
+      openExitGate();
+      
+      // Wait for car to exit (using AFTER sensor)
+      unsigned long gateOpenTime = millis();
+      bool carExited = false;
+      
+      while (millis() - gateOpenTime < 10000) {
+        if (isCarPresent(TRIG_EXIT_AFTER, ECHO_EXIT_AFTER)) {
+          carExited = true;
+          Serial.println("[EXIT] Car detected at AFTER sensor");
+          break;
+        }
+        delay(50);
+      }
+      
+      if (carExited) {
+        // Wait for car to clear the gate
+        while (isCarPresent(TRIG_EXIT_AFTER, ECHO_EXIT_AFTER)) {
+          delay(50);
+        }
+        occupiedSpaces--;
+        Serial.printf("[EXIT] Car exited. Occupied: %d/%d\n", occupiedSpaces, totalSpaces);
+      }
+      
+      closeExitGate();
+      updateDisplays();
+      
+      // Show goodbye message
+      lcdExit.clear();
+      lcdExit.setCursor(0, 0);
+      lcdExit.print("Goodbye!");
+      lcdExit.setCursor(0, 1);
+      lcdExit.print("Drive Safely!");
+      delay(2000);
+      updateDisplays();
+      
+    } else {
+      // No cars to exit
+      lcdExit.clear();
+      lcdExit.setCursor(0, 0);
+      lcdExit.print("No Cars");
+      lcdExit.setCursor(0, 1);
+      lcdExit.print("to Exit!");
+      
+      beepError();
+    }
+    
+    rfidExit.PICC_HaltA();
+    delay(1000);
+  }
+  
+  // ========== CAR DETECTION FOR LCD MESSAGES (Before gates) ==========
+  
+  // Check for car at ENTRY before gate (waiting to enter)
+  if (isCarPresent(TRIG_ENTRY_BEFORE, ECHO_ENTRY_BEFORE)) {
+    lcdEntry.clear();
+    lcdEntry.setCursor(0, 0);
+    lcdEntry.print("Welcome!");
+    lcdEntry.setCursor(0, 1);
+    lcdEntry.print("Scan Your Card");
+  } else {
+    // Show normal display if no car waiting
+    int availableSpaces = totalSpaces - occupiedSpaces;
+    lcdEntry.setCursor(0, 1);
+    lcdEntry.print("Free: ");
+    lcdEntry.print(availableSpaces);
+    lcdEntry.print("/");
+    lcdEntry.print(totalSpaces);
+  }
+  
+  // Check for car at EXIT before gate (waiting to exit)
+  if (isCarPresent(TRIG_EXIT_BEFORE, ECHO_EXIT_BEFORE)) {
+    lcdExit.clear();
+    lcdExit.setCursor(0, 0);
+    lcdExit.print("Goodbye!");
+    lcdExit.setCursor(0, 1);
+    lcdExit.print("Scan Your Card");
+  } else {
+    // Show normal display if no car waiting
+    int availableSpaces = totalSpaces - occupiedSpaces;
+    lcdExit.setCursor(0, 1);
+    lcdExit.print("Free: ");
+    lcdExit.print(availableSpaces);
+    lcdExit.print("/");
+    lcdExit.print(totalSpaces);
+  }
+  
+  // Debug output every 2 seconds
+  static unsigned long lastDebug = 0;
+  if (millis() - lastDebug > 2000) {
+    lastDebug = millis();
+    Serial.printf("[DEBUG] Occupied: %d/%d\n", occupiedSpaces, totalSpaces);
+    Serial.printf("  Entry Before: %s, After: %s\n", 
+      isCarPresent(TRIG_ENTRY_BEFORE, ECHO_ENTRY_BEFORE) ? "CAR" : "CLEAR",
+      isCarPresent(TRIG_ENTRY_AFTER, ECHO_ENTRY_AFTER) ? "CAR" : "CLEAR");
+    Serial.printf("  Exit Before: %s, After: %s\n", 
+      isCarPresent(TRIG_EXIT_BEFORE, ECHO_EXIT_BEFORE) ? "CAR" : "CLEAR",
+      isCarPresent(TRIG_EXIT_AFTER, ECHO_EXIT_AFTER) ? "CAR" : "CLEAR");
+  }
+  
+  delay(100);
+}*/
