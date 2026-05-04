@@ -1,0 +1,137 @@
+Here's your complete cheat sheet — every command you'll ever need, copy-paste ready. I'd save this as a text file on your Pi for quick reference.
+The Golden Rule
+Every change to authorized cards must end with INCR parking:cards_version. Otherwise the ESP32 won't know anything changed.
+
+📋 LIST / INSPECT
+bash# Show all authorized card UIDs
+redis-cli GET parking:valid_cards_csv
+
+# Show cache version (every change increments this)
+redis-cli GET parking:cards_version
+
+# Show details of one card
+redis-cli HGETALL card:60:9A:B5:61
+
+# Show entry/exit counts for a card
+redis-cli GET card:60:9A:B5:61:entry_count
+redis-cli GET card:60:9A:B5:61:exit_count
+
+# Show parking lot status
+redis-cli HGETALL parking:status
+
+# Show last 10 entries
+redis-cli LRANGE parking:entry_log 0 9
+
+# Show last 10 exits
+redis-cli LRANGE parking:exit_log 0 9
+
+➕ ADD A CARD
+First card ever (CSV is empty):
+bashredis-cli HSET card:60:9A:B5:61 owner "Test User" status 1
+redis-cli SET parking:valid_cards_csv "60:9A:B5:61"
+redis-cli INCR parking:cards_version
+Adding more cards (CSV already has entries):
+bashredis-cli HSET card:61:EC:10:17 owner "Star" status 1
+redis-cli APPEND parking:valid_cards_csv ",61:EC:10:17"
+redis-cli INCR parking:cards_version
+
+⚠️ Use APPEND only when CSV is non-empty. To check first: redis-cli GET parking:valid_cards_csv
+
+
+✏️ EDIT A CARD (change owner name)
+bashredis-cli HSET card:60:9A:B5:61 owner "New Name"
+redis-cli INCR parking:cards_version
+
+Note: editing the owner doesn't change the CSV — only INCR is needed to push the new name to the ESP32 cache.
+
+
+🚫 REVOKE A CARD (disable but keep history)
+Step 1 — disable the card:
+bashredis-cli HSET card:60:9A:B5:61 status 0
+Step 2 — see current CSV so you know what to remove:
+bashredis-cli GET parking:valid_cards_csv
+# Example output: "60:9A:B5:61,FB:1C:FB:05,61:EC:10:17"
+Step 3 — set CSV without that UID:
+bashredis-cli SET parking:valid_cards_csv "FB:1C:FB:05,61:EC:10:17"
+redis-cli INCR parking:cards_version
+
+🗑️ DELETE A CARD COMPLETELY (no audit trail)
+bashredis-cli DEL card:60:9A:B5:61
+redis-cli DEL card:60:9A:B5:61:entry_count
+redis-cli DEL card:60:9A:B5:61:exit_count
+# Then update CSV (same as revoke, step 2-3)
+redis-cli GET parking:valid_cards_csv
+redis-cli SET parking:valid_cards_csv "FB:1C:FB:05,61:EC:10:17"
+redis-cli INCR parking:cards_version
+
+🔧 PARKING LOT MAINTENANCE
+bash# Reset occupied count (useful after testing)
+redis-cli SET parking:occupied_persistent 0
+
+# Change total spaces (must also edit ESP32 code to match)
+redis-cli HSET parking:status total 20
+
+# Clear entry log
+redis-cli DEL parking:entry_log
+
+# Clear exit log
+redis-cli DEL parking:exit_log
+
+🔍 SEARCH / DEBUG
+bash# Find all parking keys
+redis-cli KEYS "parking:*"
+
+# Find all card keys
+redis-cli KEYS "card:*"
+
+# Count how many cards are registered
+redis-cli KEYS "card:*" | grep -v "_count" | wc -l
+
+# Live-watch all Redis commands as they happen (Ctrl+C to exit)
+redis-cli MONITOR
+
+# Test connection
+redis-cli PING
+# Should reply: PONG
+
+# Check Redis info / memory usage
+redis-cli INFO memory
+
+💾 BACKUP / RESTORE
+bash# Force Redis to save to disk right now
+redis-cli BGSAVE
+
+# Export all parking data to a text file
+redis-cli --scan --pattern "parking:*" | xargs -I{} redis-cli DUMP {} > parking_backup.txt
+redis-cli --scan --pattern "card:*"    | xargs -I{} redis-cli DUMP {} > cards_backup.txt
+
+🔄 NUCLEAR RESET (start completely fresh)
+bash# ⚠️ DELETES ALL CARDS AND LOGS — be sure!
+redis-cli FLUSHDB
+
+# Reseed with one test card
+redis-cli HSET card:60:9A:B5:61 owner "Test" status 1
+redis-cli SET parking:valid_cards_csv "60:9A:B5:61"
+redis-cli SET parking:cards_version 1
+redis-cli SET parking:occupied_persistent 0
+
+🐳 IF REDIS IS IN DOCKER (your setup)
+If redis-cli isn't installed on the Pi directly, prefix every command with docker exec:
+bash# Find your Redis container name
+docker ps
+
+# Then use it like this (replace 'redis' with your actual container name):
+docker exec -it redis redis-cli GET parking:valid_cards_csv
+docker exec -it redis redis-cli HSET card:NEW:UID owner "Name" status 1
+# ... etc
+Even better — install redis-cli directly on the Pi so you don't need the prefix every time:
+bashsudo apt install redis-tools
+After that, redis-cli works directly because it just connects to localhost:6379, which is what your Docker container exposes.
+
+✅ HOW TO VERIFY A CHANGE WORKED
+After any add/revoke/edit, watch the ESP32 serial monitor. Within 3 seconds you should see:
+[CACHE] Version changed (5 -> 6) — refreshing
+[CACHE] Refreshed — 3 valid UID(s) cached (version 6)
+Then check on the ESP32 directly by typing in Serial Monitor:
+cache
+This dumps the current authorized list right from the ESP32's flash.
