@@ -526,10 +526,40 @@ void beepGateOpen() {
   ledcWriteTone(14, 1800); delay(150); ledcWriteTone(14, 0);
 }
 
-void openEntryGate()  { Serial.println("[ENTRY GATE] Opening..."); beepGateOpen(); servoEntry.write(90); }
-void closeEntryGate() { Serial.println("[ENTRY GATE] Closing..."); servoEntry.write(0); }
-void openExitGate()   { Serial.println("[EXIT GATE] Opening...");  beepGateOpen(); servoExit.write(90); }
-void closeExitGate()  { Serial.println("[EXIT GATE] Closing...");  servoExit.write(0); }
+// make the servo slow
+void openEntryGate() {
+  Serial.println("[ENTRY GATE] Opening slowly...");
+  beepGateOpen();
+  for (int pos = 0; pos <= 90; pos++) {
+    servoEntry.write(pos);
+    delay(15); // Geschwindigkeit: 15ms pro Grad
+  }
+}
+
+void closeEntryGate() {
+  Serial.println("[ENTRY GATE] Closing slowly...");
+  for (int pos = 90; pos >= 0; pos--) {
+    servoEntry.write(pos);
+    delay(15);
+  }
+}
+
+void openExitGate() {
+  Serial.println("[EXIT GATE] Opening slowly...");
+  beepGateOpen();
+  for (int pos = 0; pos <= 90; pos++) {
+    servoExit.write(pos);
+    delay(15);
+  }
+}
+
+void closeExitGate() {
+  Serial.println("[EXIT GATE] Closing slowly...");
+  for (int pos = 90; pos >= 0; pos--) {
+    servoExit.write(pos);
+    delay(15);
+  }
+}
 
 void updateEntryLCD() {
   int avail = totalSpaces - occupiedSpaces;
@@ -768,20 +798,51 @@ void loop() {
       beepSuccess();
       logCardEntry(cardUID);
       openEntryGate();
-      delay(3000);
+      //delay(2000);
 
-      occupiedSpaces++;
+      // occupiedSpaces++;   "we minus place after sensor detect enter in line 816"
       saveOccupiedToRedis();
       updateParkingStatus();
-      closeEntryGate();
+     // closeEntryGate();    stop closing until car is passed
       flushRFID(rfidEntry);   // discard any cards swiped during gate motion
       updateEntryLCD();
       updateExitLCD();
 
-      lcdEntry.clear();
-      lcdEntry.setCursor(0, 0); lcdEntry.print("Welcome " + owner + "!");
-      lcdEntry.setCursor(0, 1); lcdEntry.print("Drive Safely!");
-      delay(2000);
+      //lcdEntry.clear();
+      //lcdEntry.setCursor(0, 0); lcdEntry.print("Welcome " + owner + "!");
+      //lcdEntry.setCursor(0, 1); lcdEntry.print("Drive Safely!");
+      //delay(2000);
+      //updateEntryLCD();
+
+
+      // Wait for car to enter (using AFTER sensor)
+      unsigned long gateOpenTime = millis();
+      bool carEntered = false;
+
+      while (millis() - gateOpenTime < 15000) {
+        if (isCarPresent(TRIG_ENTRY_AFTER, ECHO_ENTRY_AFTER)) {
+          carEntered = true;
+          Serial.println("[ENTRY] Car detected at AFTER sensor");
+          lcdEntry.clear();
+          lcdEntry.setCursor(0, 0);
+          lcdEntry.print("Car Detected");
+          lcdEntry.setCursor(0, 1);
+          lcdEntry.print("Please Proceed");
+          break;
+        }
+        delay(10);
+      }
+      
+      if (carEntered) {
+        // Wait for car to clear the gate
+        while (isCarPresent(TRIG_ENTRY_AFTER, ECHO_ENTRY_AFTER)) {
+          delay(50);
+        }
+        occupiedSpaces++;
+        Serial.printf("[ENTRY] Car entered. Occupied: %d/%d\n", occupiedSpaces, totalSpaces);
+      }
+      
+      closeEntryGate();
       updateEntryLCD();
 
     } else {
@@ -795,6 +856,22 @@ void loop() {
 
     rfidEntry.PICC_HaltA();
     delay(500);
+  }
+
+  // ========== CHECK FOR CAR AT EXIT (BEFORE SENSOR) ==========
+  bool carAtExitBefore = isCarPresent(TRIG_EXIT_BEFORE, ECHO_EXIT_BEFORE);
+  
+  if (carAtExitBefore) {
+    // Show scan card message on exit LCD
+    lcdExit.clear();
+    lcdExit.setCursor(0, 0);
+    lcdExit.print("Goodbye!");
+    lcdExit.setCursor(0, 1);
+    lcdExit.print("Scan Your Card");
+    // NO BEEP HERE - Only RFID triggers beep
+  } else {
+    // Show normal exit display (Exit Ready)
+    updateExitLCD();
   }
 
   // ========== EXIT RFID ==========
@@ -815,21 +892,51 @@ void loop() {
       beepSuccess();
       logCardExit(cardUID);
       openExitGate();
-      delay(3000);
+      //delay(3000);
 
-      occupiedSpaces--;
+      //occupiedSpaces--;
       saveOccupiedToRedis();
       updateParkingStatus();
-      closeExitGate();
+      //closeExitGate();
       flushRFID(rfidExit);
       updateEntryLCD();
       updateExitLCD();
 
-      lcdExit.clear();
-      lcdExit.setCursor(0, 0); lcdExit.print("Goodbye " + owner + "!");
-      lcdExit.setCursor(0, 1); lcdExit.print("Drive Safely!");
-      delay(2000);
-      updateExitLCD();
+      //lcdExit.clear();
+      //lcdExit.setCursor(0, 0); lcdExit.print("Goodbye " + owner + "!");
+      //lcdExit.setCursor(0, 1); lcdExit.print("Drive Safely!");
+      //delay(2000);
+      //updateExitLCD();
+
+      // Wait for car to Exit (using AFTER sensor)
+      unsigned long gateOpenTime = millis();
+      bool carEntered = false;
+
+      while (millis() - gateOpenTime < 15000) {
+        if (isCarPresent(TRIG_EXIT_AFTER, ECHO_EXIT_AFTER)) {
+          carEntered = true;
+          Serial.println("[ENTRY] Car detected at AFTER sensor");
+          lcdExit.clear();
+          lcdExit.setCursor(0, 0);
+          lcdExit.print("Car Detected");
+          lcdExit.setCursor(0, 1);
+          lcdExit.print("Please Proceed");
+          break;
+        }
+        delay(10);
+      }
+      
+      if (carEntered) {
+        // Wait for car to clear the gate
+        while (isCarPresent(TRIG_EXIT_AFTER, ECHO_EXIT_AFTER)) {
+          delay(50);
+        }
+        occupiedSpaces--;
+        Serial.printf("[ENTRY] Car entered. Occupied: %d/%d\n", occupiedSpaces, totalSpaces);
+      }
+      
+      closeExitGate();
+      updateEntryLCD();
 
     } else {
       lcdExit.clear();
