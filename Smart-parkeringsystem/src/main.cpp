@@ -661,6 +661,57 @@ void handleSerialCommands() {
   }
 }
 
+
+// =======================================================
+// ADMIN COMMAND QUEUE
+// Web app pushes commands to Redis list "parking:commands"
+// ESP32 polls every 2 s, pops one, executes it.
+// Supported actions: OPEN_ENTRY, CLOSE_ENTRY, OPEN_EXIT,
+//                    CLOSE_EXIT, RESET_COUNT, FORCE_REFRESH
+// =======================================================
+unsigned long lastCommandCheck = 0;
+const unsigned long COMMAND_CHECK_INTERVAL_MS = 2000UL;
+
+void checkAdminCommands() {
+  if (!redisOnline) return;
+  if (millis() - lastCommandCheck < COMMAND_CHECK_INTERVAL_MS) return;
+  lastCommandCheck = millis();
+
+  String cmd = redis.rpop("parking:commands");
+  if (cmd.length() == 0) return;
+
+  Serial.printf("[ADMIN] Command received: %s\n", cmd.c_str());
+  cmd.trim();
+
+  if (cmd == "OPEN_ENTRY") {
+    openEntryGate();
+  }
+  else if (cmd == "CLOSE_ENTRY") {
+    closeEntryGate();
+  }
+  else if (cmd == "OPEN_EXIT") {
+    openExitGate();
+  }
+  else if (cmd == "CLOSE_EXIT") {
+    closeExitGate();
+  }
+  else if (cmd == "RESET_COUNT") {
+    occupiedSpaces = 0;
+    saveOccupiedToRedis();
+    updateParkingStatus();
+    updateEntryLCD();
+    updateExitLCD();
+    Serial.println("[ADMIN] Occupied count reset to 0");
+  }
+  else if (cmd == "FORCE_REFRESH") {
+    refreshValidUidCache();
+    Serial.println("[ADMIN] Cache force-refreshed");
+  }
+  else {
+    Serial.printf("[ADMIN] Unknown command: %s\n", cmd.c_str());
+  }
+}
+
 // =======================================================
 // SETUP
 // =======================================================
@@ -765,6 +816,9 @@ void loop() {
   // Cheap version-poll for admin updates (every 3 s when online)
   checkForCacheUpdates();
 
+    // Pop and execute admin commands from web app (every 2 s)
+  checkAdminCommands();
+
   // If we still have no cache, keep the LCD warning visible and skip RFID
   if (!cacheReady) {
     delay(200);
@@ -845,14 +899,24 @@ void loop() {
       closeEntryGate();
       updateEntryLCD();
 
-    } else {
+  } else if (cardStatus == 1 && occupiedSpaces >= totalSpaces) {
+      // Valid card, but lot is full
       lcdEntry.clear();
-      lcdEntry.setCursor(0, 0); lcdEntry.print("INVALID CARD");
-      lcdEntry.setCursor(0, 1); lcdEntry.print("Access Denied!");
+      lcdEntry.setCursor(0, 0); lcdEntry.print("Parking Full");
+      lcdEntry.setCursor(0, 1); lcdEntry.print("No Free Space");
       beepError();
       delay(2000);
       updateEntryLCD();
-    }
+      }
+      else {
+        // Truly invalid card
+        lcdEntry.clear();
+        lcdEntry.setCursor(0, 0); lcdEntry.print("INVALID CARD");
+        lcdEntry.setCursor(0, 1); lcdEntry.print("Access Denied!");
+        beepError();
+        delay(2000);
+        updateEntryLCD();
+  }
 
     rfidEntry.PICC_HaltA();
     delay(500);
@@ -936,7 +1000,7 @@ void loop() {
       }
       
       closeExitGate();
-      updateEntryLCD();
+      updateExitLCD();
 
     } else {
       lcdExit.clear();
